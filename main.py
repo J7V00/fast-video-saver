@@ -30,33 +30,55 @@ def extract_youtube_id(url: str):
             return parse_qs(parsed.query).get("v", [None])[0]
     return None
 
-async def fetch_youtube_fallback(video_id: str):
-    instances = [
-        "https://pipedapi.kavin.rocks",
-        "https://pipedapi.adminforge.de",
-        "https://api.piped.projectsegfau.lt",
-        "https://pipedapi.in.projectsegfau.lt"
-    ]
-    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-        for base in instances:
+async def fetch_youtube_via_api(url: str, video_id: str):
+    async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+        # 1. محاولة عبر Cobalt API
+        cobalt_instances = [
+            "https://api.cobalt.tools",
+            "https://cobalt-api.kwiatekmiki.com",
+            "https://cobalt.api.timelessnesses.me"
+        ]
+        for api_url in cobalt_instances:
             try:
-                res = await client.get(f"{base}/streams/{video_id}")
+                res = await client.post(
+                    f"{api_url}/",
+                    json={"url": url, "videoQuality": "720", "filenameStyle": "basic"},
+                    headers={"Accept": "application/json", "Content-Type": "application/json"}
+                )
                 if res.status_code == 200:
                     data = res.json()
-                    streams = data.get("videoStreams", [])
-                    mp4_streams = [s for s in streams if s.get("format") == "MPEG_4" and not s.get("videoOnly")]
-                    if not mp4_streams:
-                        mp4_streams = [s for s in streams if not s.get("videoOnly")]
-                    if mp4_streams:
-                        best = sorted(mp4_streams, key=lambda x: int(re.sub(r'\D', '', x.get("quality", "0")) or 0), reverse=True)[0]
+                    if data.get("url"):
                         return {
-                            "title": sanitize_filename(data.get("title", "youtube_video")),
-                            "thumbnail": data.get("thumbnailUrl"),
-                            "platform": "YouTube",
-                            "direct_url": best.get("url")
+                            "title": sanitize_filename(data.get("filename", f"youtube_{video_id}").replace(".mp4", "")),
+                            "thumbnail": f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
+                            "direct_url": data["url"]
                         }
             except Exception:
                 continue
+
+        # 2. محاولة احتياطية عبر Invidious API
+        invidious_instances = [
+            "https://inv.nadeko.net",
+            "https://invidious.nerdvpn.de",
+            "https://iv.datura.network"
+        ]
+        for inv in invidious_instances:
+            try:
+                res = await client.get(f"{inv}/api/v1/videos/{video_id}")
+                if res.status_code == 200:
+                    data = res.json()
+                    streams = data.get("formatStreams", [])
+                    mp4s = [s for s in streams if "video/mp4" in s.get("type", "")]
+                    if mp4s:
+                        best = mp4s[-1]
+                        return {
+                            "title": sanitize_filename(data.get("title", f"youtube_{video_id}")),
+                            "thumbnail": f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
+                            "direct_url": best["url"]
+                        }
+            except Exception:
+                continue
+
     return None
 
 @app.api_route("/", methods=["GET", "HEAD"])
@@ -79,13 +101,14 @@ YDL_OPTS = {
 async def get_video_info(url: str = Query(...)):
     yt_id = extract_youtube_id(url)
     if yt_id:
-        yt_data = await fetch_youtube_fallback(yt_id)
+        yt_data = await fetch_youtube_via_api(url, yt_id)
         if yt_data and yt_data.get("direct_url"):
             return {
                 "title": yt_data["title"],
                 "thumbnail": yt_data["thumbnail"],
                 "platform": "YouTube"
             }
+        raise HTTPException(status_code=400, detail="يوتيوب يحظر سيرفرات الاستضافة حالياً. جرّب TikTok أو X أو Instagram.")
 
     try:
         with yt_dlp.YoutubeDL(YDL_OPTS) as ydl:
@@ -96,7 +119,7 @@ async def get_video_info(url: str = Query(...)):
                 "platform": info.get("extractor_key"),
             }
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"تعذر قراءة الرابط: {str(e)[:100]}")
+        raise HTTPException(status_code=400, detail="تعذر قراءة الرابط. تأكد أن الفيديو عام وليس خاصاً.")
 
 @app.get("/api/stream")
 async def stream_video(url: str = Query(...), title: str = Query("video")):
@@ -105,7 +128,7 @@ async def stream_video(url: str = Query(...), title: str = Query("video")):
 
     yt_id = extract_youtube_id(url)
     if yt_id:
-        yt_data = await fetch_youtube_fallback(yt_id)
+        yt_data = await fetch_youtube_via_api(url, yt_id)
         if yt_data and yt_data.get("direct_url"):
             video_url = yt_data["direct_url"]
 
@@ -115,8 +138,8 @@ async def stream_video(url: str = Query(...), title: str = Query("video")):
                 info = ydl.extract_info(url, download=False)
                 video_url = info.get("url")
                 http_headers = info.get("http_headers", {})
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"فشل التحميل: {str(e)[:100]}")
+        except Exception:
+            raise HTTPException(status_code=500, detail="فشل تحميل الفيديو من المصدر.")
 
     async def iterfile():
         async with httpx.AsyncClient(headers=http_headers, follow_redirects=True, timeout=60.0) as client:
