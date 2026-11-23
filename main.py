@@ -5,6 +5,7 @@ from urllib.parse import quote
 import yt_dlp
 import httpx
 import re
+import os
 
 app = FastAPI()
 
@@ -14,6 +15,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+COOKIE_PATH = "/tmp/cookies.txt"
+if os.environ.get("YOUTUBE_COOKIES"):
+    with open(COOKIE_PATH, "w", encoding="utf-8") as f:
+        f.write(os.environ.get("YOUTUBE_COOKIES"))
 
 def sanitize_filename(title: str) -> str:
     clean = re.sub(r'[\\/*?:"<>|]', "", title)
@@ -27,26 +33,22 @@ def serve_home():
 def serve_manifest():
     return FileResponse("manifest.json")
 
-YDL_OPTS = {
-    'format': 'best[ext=mp4]/best',
-    'quiet': True,
-    'no_warnings': True,
-    'nocheckcertificate': True,
-    'geo_bypass': True,
-    'extractor_args': {
-        'youtube': {
-            'player_client': ['ios', 'tv_embedded', 'mweb', 'android']
-        }
-    },
-    'http_headers': {
-        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1'
+def get_ydl_opts():
+    opts = {
+        'format': 'best[ext=mp4]/best',
+        'quiet': True,
+        'no_warnings': True,
+        'nocheckcertificate': True,
+        'geo_bypass': True,
     }
-}
+    if os.path.exists(COOKIE_PATH):
+        opts['cookiefile'] = COOKIE_PATH
+    return opts
 
 @app.get("/api/info")
 def get_video_info(url: str = Query(...)):
     try:
-        with yt_dlp.YoutubeDL(YDL_OPTS) as ydl:
+        with yt_dlp.YoutubeDL(get_ydl_opts()) as ydl:
             info = ydl.extract_info(url, download=False)
             return {
                 "title": sanitize_filename(info.get("title", "video")),
@@ -60,7 +62,7 @@ def get_video_info(url: str = Query(...)):
 @app.get("/api/stream")
 async def stream_video(url: str = Query(...), title: str = Query("video")):
     try:
-        with yt_dlp.YoutubeDL(YDL_OPTS) as ydl:
+        with yt_dlp.YoutubeDL(get_ydl_opts()) as ydl:
             info = ydl.extract_info(url, download=False)
             video_url = info.get("url")
             http_headers = info.get("http_headers", {})
