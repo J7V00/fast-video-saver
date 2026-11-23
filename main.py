@@ -35,7 +35,7 @@ def extract_youtube_id(url: str):
 
 async def fetch_youtube_via_worker(video_id: str):
     if not CF_WORKER_URL:
-        return None
+        return {"error": "CF_WORKER_URL غير مضاف"}
 
     clients = [
         {
@@ -68,10 +68,25 @@ async def fetch_youtube_via_worker(video_id: str):
                 }
             },
             "ua": "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)"
+        },
+        {
+            "context": {
+                "client": {
+                    "clientName": "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
+                    "clientVersion": "2.0",
+                    "hl": "en",
+                    "gl": "US"
+                },
+                "thirdParty": {
+                    "embedUrl": "https://www.youtube.com/"
+                }
+            },
+            "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
         }
     ]
 
     yt_endpoint = quote("https://www.youtube.com/youtubei/v1/player?prettyPrint=false", safe="")
+    last_status = "unknown"
 
     async with httpx.AsyncClient(timeout=25.0, follow_redirects=True) as client:
         for c in clients:
@@ -87,12 +102,22 @@ async def fetch_youtube_via_worker(video_id: str):
                     json=payload,
                     headers={"User-Agent": c["ua"], "Content-Type": "application/json"}
                 )
+                last_status = f"HTTP {res.status_code}"
                 if res.status_code == 200:
                     data = res.json()
-                    formats = data.get("streamingData", {}).get("formats", [])
+                    playability = data.get("playabilityStatus", {})
+                    if playability.get("status") != "OK":
+                        last_status = f"{playability.get('status')}: {playability.get('reason', '')}"
+                        continue
+
+                    streaming = data.get("streamingData", {})
+                    formats = streaming.get("formats", []) + streaming.get("adaptiveFormats", [])
                     mp4s = [f for f in formats if f.get("url") and "video/mp4" in f.get("mimeType", "")]
                     if mp4s:
-                        best = sorted(mp4s, key=lambda x: x.get("height", 0), reverse=True)[0]
+                        # تفضيل الصيغ المدمجة صوت وصورة إن وجدت
+                        combined = [f for f in mp4s if f.get("audioQuality")]
+                        pool = combined if combined else mp4s
+                        best = sorted(pool, key=lambda x: x.get("height", 0), reverse=True)[0]
                         details = data.get("videoDetails", {})
                         thumbs = details.get("thumbnail", {}).get("thumbnails", [])
                         stream_target = quote(best["url"], safe="")
@@ -102,9 +127,11 @@ async def fetch_youtube_via_worker(video_id: str):
                             "direct_url": f"{CF_WORKER_URL}/?url={stream_target}",
                             "ua": c["ua"]
                         }
-            except Exception:
+            except Exception as e:
+                last_status = str(e)[:80]
                 continue
-    return None
+
+    return {"error": last_status}
 
 @app.api_route("/", methods=["GET", "HEAD"])
 def serve_home():
@@ -133,7 +160,7 @@ async def get_video_info(url: str = Query(...)):
                 "thumbnail": yt_data["thumbnail"],
                 "platform": "YouTube"
             }
-        raise HTTPException(status_code=400, detail=f"فشل الجسر (CF_WORKER_URL={'موجود' if CF_WORKER_URL else 'فارغ'}).")
+        raise HTTPException(status_code=400, detail=f"رد الجسر: {yt_data.get('error')}")
 
     try:
         with yt_dlp.YoutubeDL(YDL_OPTS) as ydl:
