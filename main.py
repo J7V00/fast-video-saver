@@ -25,7 +25,7 @@ def sanitize_filename(title: str) -> str:
     clean = re.sub(r'[\\/*?:"<>|]', "", title)
     return clean[:50].strip() or "video"
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 def serve_home():
     return FileResponse("index.html")
 
@@ -40,8 +40,13 @@ def get_ydl_opts():
         'no_warnings': True,
         'nocheckcertificate': True,
         'geo_bypass': True,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['tv_embedded', 'mweb', 'web_safari']
+            }
+        }
     }
-    if os.path.exists(COOKIE_PATH):
+    if os.path.exists(COOKIE_PATH) and os.path.getsize(COOKIE_PATH) > 50:
         opts['cookiefile'] = COOKIE_PATH
     return opts
 
