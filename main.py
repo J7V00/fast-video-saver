@@ -37,7 +37,24 @@ async def fetch_youtube_via_worker(video_id: str):
     if not CF_WORKER_URL:
         return {"error": "CF_WORKER_URL غير مضاف"}
 
+    # وضع ANDROID_VR في المقدمة لأنه الأسرع والأكثر استقراراً
     clients = [
+        {
+            "context": {
+                "client": {
+                    "clientName": "ANDROID_VR",
+                    "clientVersion": "1.65.10",
+                    "deviceMake": "Oculus",
+                    "deviceModel": "Quest 3",
+                    "osName": "Android",
+                    "osVersion": "14",
+                    "androidSdkVersion": 34,
+                    "hl": "en",
+                    "gl": "US"
+                }
+            },
+            "ua": "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 14; eureka-user Build/UP1A.231005.007) gzip"
+        },
         {
             "context": {
                 "client": {
@@ -68,22 +85,6 @@ async def fetch_youtube_via_worker(video_id: str):
                 }
             },
             "ua": "com.google.android.youtube/20.10.38 (Linux; U; Android 15; en_US; Pixel 9 Pro Build/AP4A.250205.002) gzip"
-        },
-        {
-            "context": {
-                "client": {
-                    "clientName": "ANDROID_VR",
-                    "clientVersion": "1.65.10",
-                    "deviceMake": "Oculus",
-                    "deviceModel": "Quest 3",
-                    "osName": "Android",
-                    "osVersion": "14",
-                    "androidSdkVersion": 34,
-                    "hl": "en",
-                    "gl": "US"
-                }
-            },
-            "ua": "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 14; eureka-user Build/UP1A.231005.007) gzip"
         }
     ]
 
@@ -91,46 +92,47 @@ async def fetch_youtube_via_worker(video_id: str):
     last_status = "unknown"
 
     async with httpx.AsyncClient(timeout=25.0, follow_redirects=True) as client:
-        for c in clients:
-            try:
-                payload = {
-                    "context": c["context"],
-                    "videoId": video_id,
-                    "contentCheckOk": True,
-                    "racyCheckOk": True
-                }
-                res = await client.post(
-                    f"{CF_WORKER_URL}/?url={yt_endpoint}",
-                    json=payload,
-                    headers={"User-Agent": c["ua"], "Content-Type": "application/json"}
-                )
-                last_status = f"HTTP {res.status_code}"
-                if res.status_code == 200:
-                    data = res.json()
-                    playability = data.get("playabilityStatus", {})
-                    if playability.get("status") != "OK":
-                        last_status = f"{playability.get('status')}: {playability.get('reason', '')}"
-                        continue
+        # إعادة المحاولة التلقائية مرتين في الخلفية لضمان النجاح من أول ضغطة
+        for _attempt in range(2):
+            for c in clients:
+                try:
+                    payload = {
+                        "context": c["context"],
+                        "videoId": video_id,
+                        "contentCheckOk": True,
+                        "racyCheckOk": True
+                    }
+                    res = await client.post(
+                        f"{CF_WORKER_URL}/?url={yt_endpoint}",
+                        json=payload,
+                        headers={"User-Agent": c["ua"], "Content-Type": "application/json"}
+                    )
+                    if res.status_code == 200:
+                        data = res.json()
+                        playability = data.get("playabilityStatus", {})
+                        if playability.get("status") != "OK":
+                            last_status = f"{playability.get('status')}: {playability.get('reason', '')}"
+                            continue
 
-                    streaming = data.get("streamingData", {})
-                    formats = streaming.get("formats", []) + streaming.get("adaptiveFormats", [])
-                    mp4s = [f for f in formats if f.get("url") and "video/mp4" in f.get("mimeType", "")]
-                    if mp4s:
-                        combined = [f for f in mp4s if f.get("audioQuality")]
-                        pool = combined if combined else mp4s
-                        best = sorted(pool, key=lambda x: x.get("height", 0), reverse=True)[0]
-                        details = data.get("videoDetails", {})
-                        thumbs = details.get("thumbnail", {}).get("thumbnails", [])
-                        stream_target = quote(best["url"], safe="")
-                        return {
-                            "title": sanitize_filename(details.get("title", f"youtube_{video_id}")),
-                            "thumbnail": thumbs[-1]["url"] if thumbs else None,
-                            "direct_url": f"{CF_WORKER_URL}/?url={stream_target}",
-                            "ua": c["ua"]
-                        }
-            except Exception as e:
-                last_status = str(e)[:80]
-                continue
+                        streaming = data.get("streamingData", {})
+                        formats = streaming.get("formats", []) + streaming.get("adaptiveFormats", [])
+                        mp4s = [f for f in formats if f.get("url") and "video/mp4" in f.get("mimeType", "")]
+                        if mp4s:
+                            combined = [f for f in mp4s if f.get("audioQuality")]
+                            pool = combined if combined else mp4s
+                            best = sorted(pool, key=lambda x: x.get("height", 0), reverse=True)[0]
+                            details = data.get("videoDetails", {})
+                            thumbs = details.get("thumbnail", {}).get("thumbnails", [])
+                            stream_target = quote(best["url"], safe="")
+                            return {
+                                "title": sanitize_filename(details.get("title", f"youtube_{video_id}")),
+                                "thumbnail": thumbs[-1]["url"] if thumbs else None,
+                                "direct_url": f"{CF_WORKER_URL}/?url={stream_target}",
+                                "ua": c["ua"]
+                            }
+                except Exception as e:
+                    last_status = str(e)[:80]
+                    continue
 
     return {"error": last_status}
 
@@ -181,10 +183,16 @@ async def stream_video(url: str = Query(...), title: str = Query("video")):
 
     yt_id = extract_youtube_id(url)
     if yt_id:
-        yt_data = await fetch_youtube_via_worker(yt_id)
-        if yt_data and yt_data.get("direct_url"):
-            video_url = yt_data["direct_url"]
-            http_headers = {"User-Agent": yt_data["ua"]}
+        # محاولة جلب رابط بث صالح والتحقق من أنه يستجيب بـ 200 OK قبل بدء التنزيل
+        for _ in range(3):
+            yt_data = await fetch_youtube_via_worker(yt_id)
+            if yt_data and yt_data.get("direct_url"):
+                async with httpx.AsyncClient(headers={"User-Agent": yt_data["ua"]}, follow_redirects=True, timeout=15.0) as test_client:
+                    head_res = await test_client.head(yt_data["direct_url"])
+                    if head_res.status_code in (200, 206):
+                        video_url = yt_data["direct_url"]
+                        http_headers = {"User-Agent": yt_data["ua"]}
+                        break
 
     if not video_url:
         try:
