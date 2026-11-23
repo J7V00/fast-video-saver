@@ -4,6 +4,7 @@ from fastapi.responses import StreamingResponse, FileResponse
 from urllib.parse import quote, urlparse, parse_qs
 import yt_dlp
 import httpx
+import time
 import re
 import os
 
@@ -17,6 +18,10 @@ app.add_middleware(
 )
 
 CF_WORKER_URL = os.environ.get("CF_WORKER_URL", "").rstrip("/")
+
+# ذاكرة مؤقتة لحفظ الروابط التي تم التحقق من صلاحيتها (لمدة 10 دقائق)
+YT_CACHE: dict[str, dict] = {}
+CACHE_TTL = 600
 
 def sanitize_filename(title: str) -> str:
     clean = re.sub(r'[\\/*?:"<>|]', "", title)
@@ -33,7 +38,22 @@ def extract_youtube_id(url: str):
             return parse_qs(parsed.query).get("v", [None])[0]
     return None
 
-async def fetch_youtube_via_worker(video_id: str):
+async def verify_stream_url(client: httpx.AsyncClient, stream_url: str, ua: str) -> bool:
+    """التحقق الفوري من أن خادم الفيديو يقبل التحميل قبل إرجاع الرابط للمستخدم"""
+    try:
+        headers = {"User-Agent": ua, "Range": "bytes=0-1"}
+        res = await client.get(stream_url, headers=headers, timeout=10.0)
+        return res.status_code in (200, 206)
+    except Exception:
+        return False
+
+async def fetch_youtube_via_worker(video_id: str, force_refresh: bool = False):
+    now = time.time()
+    if not force_refresh and video_id in YT_CACHE:
+        cached = YT_CACHE[video_id]
+        if now - cached["timestamp"] < CACHE_TTL:
+            return cached["data"]
+
     if not CF_WORKER_URL:
         return {"error": "CF_WORKER_URL غير مضاف"}
 
@@ -90,8 +110,8 @@ async def fetch_youtube_via_worker(video_id: str):
     yt_endpoint = quote("https://www.youtube.com/youtubei/v1/player?prettyPrint=false", safe="")
     last_status = "unknown"
 
-    async with httpx.AsyncClient(timeout=25.0, follow_redirects=True) as client:
-        for _attempt in range(2):
+    async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+        for _round in range(3):
             for c in clients:
                 try:
                     payload = {
@@ -105,29 +125,43 @@ async def fetch_youtube_via_worker(video_id: str):
                         json=payload,
                         headers={"User-Agent": c["ua"], "Content-Type": "application/json"}
                     )
-                    if res.status_code == 200:
-                        data = res.json()
-                        playability = data.get("playabilityStatus", {})
-                        if playability.get("status") != "OK":
-                            last_status = f"{playability.get('status')}: {playability.get('reason', '')}"
-                            continue
+                    if res.status_code != 200:
+                        last_status = f"HTTP {res.status_code}"
+                        continue
 
-                        streaming = data.get("streamingData", {})
-                        formats = streaming.get("formats", []) + streaming.get("adaptiveFormats", [])
-                        mp4s = [f for f in formats if f.get("url") and "video/mp4" in f.get("mimeType", "")]
-                        if mp4s:
-                            combined = [f for f in mp4s if f.get("audioQuality")]
-                            pool = combined if combined else mp4s
-                            best = sorted(pool, key=lambda x: x.get("height", 0), reverse=True)[0]
-                            details = data.get("videoDetails", {})
-                            thumbs = details.get("thumbnail", {}).get("thumbnails", [])
-                            stream_target = quote(best["url"], safe="")
-                            return {
-                                "title": sanitize_filename(details.get("title", f"youtube_{video_id}")),
-                                "thumbnail": thumbs[-1]["url"] if thumbs else None,
-                                "direct_url": f"{CF_WORKER_URL}/?url={stream_target}",
-                                "ua": c["ua"]
-                            }
+                    data = res.json()
+                    playability = data.get("playabilityStatus", {})
+                    if playability.get("status") != "OK":
+                        last_status = f"{playability.get('status')}: {playability.get('reason', '')}"
+                        continue
+
+                    streaming = data.get("streamingData", {})
+                    formats = streaming.get("formats", []) + streaming.get("adaptiveFormats", [])
+                    mp4s = [f for f in formats if f.get("url") and "video/mp4" in f.get("mimeType", "")]
+                    if not mp4s:
+                        continue
+
+                    combined = [f for f in mp4s if f.get("audioQuality")]
+                    pool = combined if combined else mp4s
+                    best = sorted(pool, key=lambda x: x.get("height", 0), reverse=True)[0]
+
+                    stream_target = quote(best["url"], safe="")
+                    proxied_stream = f"{CF_WORKER_URL}/?url={stream_target}"
+
+                    # اختبار الرابط فعلياً قبل اعتماده
+                    if await verify_stream_url(client, proxied_stream, c["ua"]):
+                        details = data.get("videoDetails", {})
+                        thumbs = details.get("thumbnail", {}).get("thumbnails", [])
+                        result = {
+                            "title": sanitize_filename(details.get("title", f"youtube_{video_id}")),
+                            "thumbnail": thumbs[-1]["url"] if thumbs else None,
+                            "direct_url": proxied_stream,
+                            "ua": c["ua"]
+                        }
+                        YT_CACHE[video_id] = {"timestamp": time.time(), "data": result}
+                        return result
+                    else:
+                        last_status = "Stream URL rejected (403)"
                 except Exception as e:
                     last_status = str(e)[:80]
                     continue
@@ -161,7 +195,7 @@ async def get_video_info(url: str = Query(...)):
                 "thumbnail": yt_data["thumbnail"],
                 "platform": "YouTube"
             }
-        raise HTTPException(status_code=400, detail=f"رد الجسر: {yt_data.get('error')}")
+        raise HTTPException(status_code=400, detail=f"تعذر تجهيز الفيديو: {yt_data.get('error')}")
 
     try:
         with yt_dlp.YoutubeDL(YDL_OPTS) as ydl:
@@ -181,12 +215,13 @@ async def stream_video(url: str = Query(...), title: str = Query("video")):
 
     yt_id = extract_youtube_id(url)
     if yt_id:
-        yt_data = await fetch_youtube_via_worker(yt_id)
+        # يستخدم الرابط المخزن والمُتحقق منه فوراً بدون إعادة طلب يوتيوب
+        yt_data = await fetch_youtube_via_worker(yt_id, force_refresh=False)
         if yt_data and yt_data.get("direct_url"):
             video_url = yt_data["direct_url"]
             http_headers = {"User-Agent": yt_data["ua"]}
         else:
-            raise HTTPException(status_code=500, detail=f"فشل جلب رابط البث من يوتيوب: {yt_data.get('error')}")
+            raise HTTPException(status_code=500, detail=f"فشل التحميل: {yt_data.get('error')}")
 
     if not video_url:
         try:
@@ -200,8 +235,6 @@ async def stream_video(url: str = Query(...), title: str = Query("video")):
     async def iterfile():
         async with httpx.AsyncClient(headers=http_headers, follow_redirects=True, timeout=60.0) as client:
             async with client.stream("GET", video_url) as r:
-                if r.status_code not in (200, 206):
-                    raise HTTPException(status_code=502, detail=f"رفض خادم الفيديو البث: HTTP {r.status_code}")
                 async for chunk in r.aiter_bytes(chunk_size=1024 * 256):
                     yield chunk
 
