@@ -3,3 +3,4 @@ uvicorn
 yt-dlp[default]
 curl_cffi
 httpx
+nodejs-wheel-binaries
