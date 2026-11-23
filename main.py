@@ -32,7 +32,15 @@ YDL_OPTS = {
     'quiet': True,
     'no_warnings': True,
     'nocheckcertificate': True,
-    'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
+    'geo_bypass': True,
+    'extractor_args': {
+        'youtube': {
+            'player_client': ['ios', 'tv_embedded', 'mweb', 'android']
+        }
+    },
+    'http_headers': {
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1'
+    }
 }
 
 @app.get("/api/info")
@@ -45,7 +53,8 @@ def get_video_info(url: str = Query(...)):
                 "thumbnail": info.get("thumbnail"),
                 "platform": info.get("extractor_key"),
             }
-    except Exception:
+    except Exception as e:
+        print("Info Error:", e)
         raise HTTPException(status_code=400, detail="تعذر قراءة الرابط. تأكد أن الفيديو عام وليس خاصاً.")
 
 @app.get("/api/stream")
