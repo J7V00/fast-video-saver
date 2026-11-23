@@ -4,6 +4,7 @@ from fastapi.responses import StreamingResponse, FileResponse
 from urllib.parse import quote
 import yt_dlp
 import httpx
+import shutil
 import re
 import os
 
@@ -40,12 +41,10 @@ def get_ydl_opts():
         'no_warnings': True,
         'nocheckcertificate': True,
         'geo_bypass': True,
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['tv_embedded', 'mweb', 'web_safari']
-            }
-        }
     }
+    node_path = shutil.which("node")
+    if node_path:
+        opts['js_runtimes'] = {'node': {'path': node_path}}
     if os.path.exists(COOKIE_PATH) and os.path.getsize(COOKIE_PATH) > 50:
         opts['cookiefile'] = COOKIE_PATH
     return opts
@@ -61,8 +60,9 @@ def get_video_info(url: str = Query(...)):
                 "platform": info.get("extractor_key"),
             }
     except Exception as e:
-        print("Info Error:", e)
-        raise HTTPException(status_code=400, detail="تعذر قراءة الرابط. تأكد أن الفيديو عام وليس خاصاً.")
+        err_msg = str(e)
+        print("Info Error:", err_msg)
+        raise HTTPException(status_code=400, detail=f"خطأ: {err_msg[:120]}")
 
 @app.get("/api/stream")
 async def stream_video(url: str = Query(...), title: str = Query("video")):
