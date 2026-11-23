@@ -37,7 +37,6 @@ async def fetch_youtube_via_worker(video_id: str):
     if not CF_WORKER_URL:
         return {"error": "CF_WORKER_URL غير مضاف"}
 
-    # وضع ANDROID_VR في المقدمة لأنه الأسرع والأكثر استقراراً
     clients = [
         {
             "context": {
@@ -92,7 +91,6 @@ async def fetch_youtube_via_worker(video_id: str):
     last_status = "unknown"
 
     async with httpx.AsyncClient(timeout=25.0, follow_redirects=True) as client:
-        # إعادة المحاولة التلقائية مرتين في الخلفية لضمان النجاح من أول ضغطة
         for _attempt in range(2):
             for c in clients:
                 try:
@@ -183,16 +181,12 @@ async def stream_video(url: str = Query(...), title: str = Query("video")):
 
     yt_id = extract_youtube_id(url)
     if yt_id:
-        # محاولة جلب رابط بث صالح والتحقق من أنه يستجيب بـ 200 OK قبل بدء التنزيل
-        for _ in range(3):
-            yt_data = await fetch_youtube_via_worker(yt_id)
-            if yt_data and yt_data.get("direct_url"):
-                async with httpx.AsyncClient(headers={"User-Agent": yt_data["ua"]}, follow_redirects=True, timeout=15.0) as test_client:
-                    head_res = await test_client.head(yt_data["direct_url"])
-                    if head_res.status_code in (200, 206):
-                        video_url = yt_data["direct_url"]
-                        http_headers = {"User-Agent": yt_data["ua"]}
-                        break
+        yt_data = await fetch_youtube_via_worker(yt_id)
+        if yt_data and yt_data.get("direct_url"):
+            video_url = yt_data["direct_url"]
+            http_headers = {"User-Agent": yt_data["ua"]}
+        else:
+            raise HTTPException(status_code=500, detail=f"فشل جلب رابط البث من يوتيوب: {yt_data.get('error')}")
 
     if not video_url:
         try:
@@ -206,6 +200,8 @@ async def stream_video(url: str = Query(...), title: str = Query("video")):
     async def iterfile():
         async with httpx.AsyncClient(headers=http_headers, follow_redirects=True, timeout=60.0) as client:
             async with client.stream("GET", video_url) as r:
+                if r.status_code not in (200, 206):
+                    raise HTTPException(status_code=502, detail=f"رفض خادم الفيديو البث: HTTP {r.status_code}")
                 async for chunk in r.aiter_bytes(chunk_size=1024 * 256):
                     yield chunk
 
