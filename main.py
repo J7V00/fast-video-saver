@@ -76,4 +76,57 @@ YDL_OPTS = {
 }
 
 @app.get("/api/info")
-async def get_video_info(url:
+async def get_video_info(url: str = Query(...)):
+    yt_id = extract_youtube_id(url)
+    if yt_id:
+        yt_data = await fetch_youtube_fallback(yt_id)
+        if yt_data and yt_data.get("direct_url"):
+            return {
+                "title": yt_data["title"],
+                "thumbnail": yt_data["thumbnail"],
+                "platform": "YouTube"
+            }
+
+    try:
+        with yt_dlp.YoutubeDL(YDL_OPTS) as ydl:
+            info = ydl.extract_info(url, download=False)
+            return {
+                "title": sanitize_filename(info.get("title", "video")),
+                "thumbnail": info.get("thumbnail"),
+                "platform": info.get("extractor_key"),
+            }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"تعذر قراءة الرابط: {str(e)[:100]}")
+
+@app.get("/api/stream")
+async def stream_video(url: str = Query(...), title: str = Query("video")):
+    video_url = None
+    http_headers = {}
+
+    yt_id = extract_youtube_id(url)
+    if yt_id:
+        yt_data = await fetch_youtube_fallback(yt_id)
+        if yt_data and yt_data.get("direct_url"):
+            video_url = yt_data["direct_url"]
+
+    if not video_url:
+        try:
+            with yt_dlp.YoutubeDL(YDL_OPTS) as ydl:
+                info = ydl.extract_info(url, download=False)
+                video_url = info.get("url")
+                http_headers = info.get("http_headers", {})
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"فشل التحميل: {str(e)[:100]}")
+
+    async def iterfile():
+        async with httpx.AsyncClient(headers=http_headers, follow_redirects=True, timeout=60.0) as client:
+            async with client.stream("GET", video_url) as r:
+                async for chunk in r.aiter_bytes(chunk_size=1024 * 256):
+                    yield chunk
+
+    encoded_filename = quote(f"{sanitize_filename(title)}.mp4")
+    return StreamingResponse(
+        iterfile(),
+        media_type="video/mp4",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"}
+    )
