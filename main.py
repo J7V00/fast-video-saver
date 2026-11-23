@@ -5,6 +5,7 @@ from urllib.parse import quote, urlparse, parse_qs
 import yt_dlp
 import httpx
 import re
+import os
 
 app = FastAPI()
 
@@ -14,6 +15,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+CF_WORKER_URL = os.environ.get("CF_WORKER_URL", "").rstrip("/")
 
 def sanitize_filename(title: str) -> str:
     clean = re.sub(r'[\\/*?:"<>|]', "", title)
@@ -30,55 +33,77 @@ def extract_youtube_id(url: str):
             return parse_qs(parsed.query).get("v", [None])[0]
     return None
 
-async def fetch_youtube_via_api(url: str, video_id: str):
-    async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
-        # 1. محاولة عبر Cobalt API
-        cobalt_instances = [
-            "https://api.cobalt.tools",
-            "https://cobalt-api.kwiatekmiki.com",
-            "https://cobalt.api.timelessnesses.me"
-        ]
-        for api_url in cobalt_instances:
+async def fetch_youtube_via_worker(video_id: str):
+    if not CF_WORKER_URL:
+        return None
+
+    clients = [
+        {
+            "context": {
+                "client": {
+                    "clientName": "ANDROID_VR",
+                    "clientVersion": "1.60.19",
+                    "deviceMake": "Oculus",
+                    "deviceModel": "Quest 3",
+                    "osName": "Android",
+                    "osVersion": "12L",
+                    "androidSdkVersion": 32,
+                    "hl": "en",
+                    "gl": "US"
+                }
+            },
+            "ua": "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip"
+        },
+        {
+            "context": {
+                "client": {
+                    "clientName": "IOS",
+                    "clientVersion": "19.29.1",
+                    "deviceMake": "Apple",
+                    "deviceModel": "iPhone16,2",
+                    "osName": "iPhone",
+                    "osVersion": "17.5.1.21F90",
+                    "hl": "en",
+                    "gl": "US"
+                }
+            },
+            "ua": "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)"
+        }
+    ]
+
+    yt_endpoint = quote("https://www.youtube.com/youtubei/v1/player?prettyPrint=false", safe="")
+
+    async with httpx.AsyncClient(timeout=25.0, follow_redirects=True) as client:
+        for c in clients:
             try:
+                payload = {
+                    "context": c["context"],
+                    "videoId": video_id,
+                    "contentCheckOk": True,
+                    "racyCheckOk": True
+                }
                 res = await client.post(
-                    f"{api_url}/",
-                    json={"url": url, "videoQuality": "720", "filenameStyle": "basic"},
-                    headers={"Accept": "application/json", "Content-Type": "application/json"}
+                    f"{CF_WORKER_URL}/?url={yt_endpoint}",
+                    json=payload,
+                    headers={"User-Agent": c["ua"], "Content-Type": "application/json"}
                 )
                 if res.status_code == 200:
                     data = res.json()
-                    if data.get("url"):
-                        return {
-                            "title": sanitize_filename(data.get("filename", f"youtube_{video_id}").replace(".mp4", "")),
-                            "thumbnail": f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
-                            "direct_url": data["url"]
-                        }
-            except Exception:
-                continue
-
-        # 2. محاولة احتياطية عبر Invidious API
-        invidious_instances = [
-            "https://inv.nadeko.net",
-            "https://invidious.nerdvpn.de",
-            "https://iv.datura.network"
-        ]
-        for inv in invidious_instances:
-            try:
-                res = await client.get(f"{inv}/api/v1/videos/{video_id}")
-                if res.status_code == 200:
-                    data = res.json()
-                    streams = data.get("formatStreams", [])
-                    mp4s = [s for s in streams if "video/mp4" in s.get("type", "")]
+                    formats = data.get("streamingData", {}).get("formats", [])
+                    mp4s = [f for f in formats if f.get("url") and "video/mp4" in f.get("mimeType", "")]
                     if mp4s:
-                        best = mp4s[-1]
+                        best = sorted(mp4s, key=lambda x: x.get("height", 0), reverse=True)[0]
+                        details = data.get("videoDetails", {})
+                        thumbs = details.get("thumbnail", {}).get("thumbnails", [])
+                        stream_target = quote(best["url"], safe="")
                         return {
-                            "title": sanitize_filename(data.get("title", f"youtube_{video_id}")),
-                            "thumbnail": f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
-                            "direct_url": best["url"]
+                            "title": sanitize_filename(details.get("title", f"youtube_{video_id}")),
+                            "thumbnail": thumbs[-1]["url"] if thumbs else None,
+                            "direct_url": f"{CF_WORKER_URL}/?url={stream_target}",
+                            "ua": c["ua"]
                         }
             except Exception:
                 continue
-
     return None
 
 @app.api_route("/", methods=["GET", "HEAD"])
@@ -101,14 +126,14 @@ YDL_OPTS = {
 async def get_video_info(url: str = Query(...)):
     yt_id = extract_youtube_id(url)
     if yt_id:
-        yt_data = await fetch_youtube_via_api(url, yt_id)
+        yt_data = await fetch_youtube_via_worker(yt_id)
         if yt_data and yt_data.get("direct_url"):
             return {
                 "title": yt_data["title"],
                 "thumbnail": yt_data["thumbnail"],
                 "platform": "YouTube"
             }
-        raise HTTPException(status_code=400, detail="يوتيوب يحظر سيرفرات الاستضافة حالياً. جرّب TikTok أو X أو Instagram.")
+        raise HTTPException(status_code=400, detail=f"فشل الجسر (CF_WORKER_URL={'موجود' if CF_WORKER_URL else 'فارغ'}).")
 
     try:
         with yt_dlp.YoutubeDL(YDL_OPTS) as ydl:
@@ -118,7 +143,7 @@ async def get_video_info(url: str = Query(...)):
                 "thumbnail": info.get("thumbnail"),
                 "platform": info.get("extractor_key"),
             }
-    except Exception as e:
+    except Exception:
         raise HTTPException(status_code=400, detail="تعذر قراءة الرابط. تأكد أن الفيديو عام وليس خاصاً.")
 
 @app.get("/api/stream")
@@ -128,9 +153,10 @@ async def stream_video(url: str = Query(...), title: str = Query("video")):
 
     yt_id = extract_youtube_id(url)
     if yt_id:
-        yt_data = await fetch_youtube_via_api(url, yt_id)
+        yt_data = await fetch_youtube_via_worker(yt_id)
         if yt_data and yt_data.get("direct_url"):
             video_url = yt_data["direct_url"]
+            http_headers = {"User-Agent": yt_data["ua"]}
 
     if not video_url:
         try:
