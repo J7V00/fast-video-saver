@@ -148,7 +148,6 @@ async def fetch_youtube_via_worker(video_id: str, force_refresh: bool = False):
                     stream_target = quote(best["url"], safe="")
                     proxied_stream = f"{CF_WORKER_URL}/?url={stream_target}"
 
-                    # اختبار الرابط فعلياً قبل اعتماده
                     if await verify_stream_url(client, proxied_stream, c["ua"]):
                         details = data.get("videoDetails", {})
                         thumbs = details.get("thumbnail", {}).get("thumbnails", [])
@@ -215,7 +214,6 @@ async def stream_video(url: str = Query(...), title: str = Query("video")):
 
     yt_id = extract_youtube_id(url)
     if yt_id:
-        # يستخدم الرابط المخزن والمُتحقق منه فوراً بدون إعادة طلب يوتيوب
         yt_data = await fetch_youtube_via_worker(yt_id, force_refresh=False)
         if yt_data and yt_data.get("direct_url"):
             video_url = yt_data["direct_url"]
@@ -238,9 +236,15 @@ async def stream_video(url: str = Query(...), title: str = Query("video")):
                 async for chunk in r.aiter_bytes(chunk_size=1024 * 256):
                     yield chunk
 
-    encoded_filename = quote(f"{sanitize_filename(title)}.mp4")
+    clean_title = sanitize_filename(title)
+    safe_ascii = re.sub(r'[^a-zA-Z0-9_-]', '_', clean_title) or "video"
+    encoded_filename = quote(f"{clean_title}.mp4")
+
     return StreamingResponse(
         iterfile(),
         media_type="video/mp4",
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"}
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe_ascii}.mp4"; filename*=UTF-8\'\'{encoded_filename}',
+            "Cache-Control": "no-cache"
+        }
     )
