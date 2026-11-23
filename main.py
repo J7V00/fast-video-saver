@@ -41,47 +41,49 @@ async def fetch_youtube_via_worker(video_id: str):
         {
             "context": {
                 "client": {
+                    "clientName": "IOS",
+                    "clientVersion": "20.10.4",
+                    "deviceMake": "Apple",
+                    "deviceModel": "iPhone17,2",
+                    "osName": "iPhone",
+                    "osVersion": "18.3.1.22D72",
+                    "hl": "en",
+                    "gl": "US"
+                }
+            },
+            "ua": "com.google.ios.youtube/20.10.4 (iPhone17,2; U; CPU iOS 18_3_1 like Mac OS X;)"
+        },
+        {
+            "context": {
+                "client": {
+                    "clientName": "ANDROID",
+                    "clientVersion": "20.10.38",
+                    "deviceMake": "Google",
+                    "deviceModel": "Pixel 9 Pro",
+                    "osName": "Android",
+                    "osVersion": "15",
+                    "androidSdkVersion": 35,
+                    "hl": "en",
+                    "gl": "US"
+                }
+            },
+            "ua": "com.google.android.youtube/20.10.38 (Linux; U; Android 15; en_US; Pixel 9 Pro Build/AP4A.250205.002) gzip"
+        },
+        {
+            "context": {
+                "client": {
                     "clientName": "ANDROID_VR",
-                    "clientVersion": "1.60.19",
+                    "clientVersion": "1.65.10",
                     "deviceMake": "Oculus",
                     "deviceModel": "Quest 3",
                     "osName": "Android",
-                    "osVersion": "12L",
-                    "androidSdkVersion": 32,
+                    "osVersion": "14",
+                    "androidSdkVersion": 34,
                     "hl": "en",
                     "gl": "US"
                 }
             },
-            "ua": "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip"
-        },
-        {
-            "context": {
-                "client": {
-                    "clientName": "IOS",
-                    "clientVersion": "19.29.1",
-                    "deviceMake": "Apple",
-                    "deviceModel": "iPhone16,2",
-                    "osName": "iPhone",
-                    "osVersion": "17.5.1.21F90",
-                    "hl": "en",
-                    "gl": "US"
-                }
-            },
-            "ua": "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)"
-        },
-        {
-            "context": {
-                "client": {
-                    "clientName": "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
-                    "clientVersion": "2.0",
-                    "hl": "en",
-                    "gl": "US"
-                },
-                "thirdParty": {
-                    "embedUrl": "https://www.youtube.com/"
-                }
-            },
-            "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+            "ua": "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 14; eureka-user Build/UP1A.231005.007) gzip"
         }
     ]
 
@@ -114,7 +116,6 @@ async def fetch_youtube_via_worker(video_id: str):
                     formats = streaming.get("formats", []) + streaming.get("adaptiveFormats", [])
                     mp4s = [f for f in formats if f.get("url") and "video/mp4" in f.get("mimeType", "")]
                     if mp4s:
-                        # تفضيل الصيغ المدمجة صوت وصورة إن وجدت
                         combined = [f for f in mp4s if f.get("audioQuality")]
                         pool = combined if combined else mp4s
                         best = sorted(pool, key=lambda x: x.get("height", 0), reverse=True)[0]
