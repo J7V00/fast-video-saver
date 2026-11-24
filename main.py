@@ -18,10 +18,28 @@ app.add_middleware(
 )
 
 CF_WORKER_URL = os.environ.get("CF_WORKER_URL", "").rstrip("/")
+YT_COOKIES_RAW = os.environ.get("YOUTUBE_COOKIES", "")
 
-# ذاكرة مؤقتة لحفظ الروابط التي تم التحقق من صلاحيتها (لمدة 10 دقائق)
 YT_CACHE: dict[str, dict] = {}
 CACHE_TTL = 600
+
+def parse_netscape_cookies(raw: str) -> str:
+    """تحويل نص الكوكيز (Netscape أو Header) إلى صيغة Cookie header صالحة"""
+    if not raw:
+        return ""
+    if "\t" not in raw:
+        return raw.strip()
+    pairs = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) >= 7:
+            pairs.append(f"{parts[5]}={parts[6]}")
+    return "; ".join(pairs)
+
+COOKIE_HEADER = parse_netscape_cookies(YT_COOKIES_RAW)
 
 def sanitize_filename(title: str) -> str:
     clean = re.sub(r'[\\/*?:"<>|]', "", title)
@@ -39,9 +57,10 @@ def extract_youtube_id(url: str):
     return None
 
 async def verify_stream_url(client: httpx.AsyncClient, stream_url: str, ua: str) -> bool:
-    """التحقق الفوري من أن خادم الفيديو يقبل التحميل قبل إرجاع الرابط للمستخدم"""
     try:
         headers = {"User-Agent": ua, "Range": "bytes=0-1"}
+        if COOKIE_HEADER:
+            headers["X-YT-Cookie"] = COOKIE_HEADER
         res = await client.get(stream_url, headers=headers, timeout=10.0)
         return res.status_code in (200, 206)
     except Exception:
@@ -58,6 +77,17 @@ async def fetch_youtube_via_worker(video_id: str, force_refresh: bool = False):
         return {"error": "CF_WORKER_URL غير مضاف"}
 
     clients = [
+        {
+            "context": {
+                "client": {
+                    "clientName": "WEB",
+                    "clientVersion": "2.20261120.01.00",
+                    "hl": "en",
+                    "gl": "US"
+                }
+            },
+            "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        },
         {
             "context": {
                 "client": {
@@ -88,22 +118,6 @@ async def fetch_youtube_via_worker(video_id: str, force_refresh: bool = False):
                 }
             },
             "ua": "com.google.ios.youtube/20.10.4 (iPhone17,2; U; CPU iOS 18_3_1 like Mac OS X;)"
-        },
-        {
-            "context": {
-                "client": {
-                    "clientName": "ANDROID",
-                    "clientVersion": "20.10.38",
-                    "deviceMake": "Google",
-                    "deviceModel": "Pixel 9 Pro",
-                    "osName": "Android",
-                    "osVersion": "15",
-                    "androidSdkVersion": 35,
-                    "hl": "en",
-                    "gl": "US"
-                }
-            },
-            "ua": "com.google.android.youtube/20.10.38 (Linux; U; Android 15; en_US; Pixel 9 Pro Build/AP4A.250205.002) gzip"
         }
     ]
 
@@ -111,7 +125,7 @@ async def fetch_youtube_via_worker(video_id: str, force_refresh: bool = False):
     last_status = "unknown"
 
     async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
-        for _round in range(3):
+        for _round in range(2):
             for c in clients:
                 try:
                     payload = {
@@ -120,10 +134,14 @@ async def fetch_youtube_via_worker(video_id: str, force_refresh: bool = False):
                         "contentCheckOk": True,
                         "racyCheckOk": True
                     }
+                    req_headers = {"User-Agent": c["ua"], "Content-Type": "application/json"}
+                    if COOKIE_HEADER:
+                        req_headers["X-YT-Cookie"] = COOKIE_HEADER
+
                     res = await client.post(
                         f"{CF_WORKER_URL}/?url={yt_endpoint}",
                         json=payload,
-                        headers={"User-Agent": c["ua"], "Content-Type": "application/json"}
+                        headers=req_headers
                     )
                     if res.status_code != 200:
                         last_status = f"HTTP {res.status_code}"
@@ -218,6 +236,8 @@ async def stream_video(url: str = Query(...), title: str = Query("video")):
         if yt_data and yt_data.get("direct_url"):
             video_url = yt_data["direct_url"]
             http_headers = {"User-Agent": yt_data["ua"]}
+            if COOKIE_HEADER:
+                http_headers["X-YT-Cookie"] = COOKIE_HEADER
         else:
             raise HTTPException(status_code=500, detail=f"فشل التحميل: {yt_data.get('error')}")
 
