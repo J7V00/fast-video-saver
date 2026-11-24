@@ -91,7 +91,7 @@
     </div>
 
     <div class="input-wrap">
-      <input type="url" id="urlInput" placeholder="الصق رابط الفيديو هنا..." autocomplete="off" />
+      <input type="text" id="urlInput" placeholder="الصق رابط الفيديو هنا..." autocomplete="off" />
     </div>
 
     <button class="btn btn-primary" id="fetchBtn" onclick="handleStart()">لصق وتحميل الآن</button>
@@ -109,17 +109,19 @@
     let currentFilename = "video.mp4";
     const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 
+    function extractUrl(raw) {
+      const match = raw.match(/https?:\/\/[^\s]+/);
+      return match ? match[0] : "";
+    }
+
     async function handleStart() {
       const input = document.getElementById("urlInput");
-      let url = input.value.trim();
+      let url = extractUrl(input.value);
 
       if (!url && navigator.clipboard && navigator.clipboard.readText) {
         try {
           const clip = await navigator.clipboard.readText();
-          if (clip && clip.startsWith("http")) {
-            url = clip.trim();
-            input.value = url;
-          }
+          url = extractUrl(clip || "");
         } catch (e) {}
       }
 
@@ -129,6 +131,7 @@
         return;
       }
 
+      input.value = url;
       const btn = document.getElementById("fetchBtn");
       btn.disabled = true;
       document.getElementById("previewBox").style.display = "none";
