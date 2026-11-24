@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
-from urllib.parse import quote, urlparse, parse_qs
+from urllib.parse import quote
 import yt_dlp
 import httpx
 import time
@@ -23,6 +23,7 @@ YT_COOKIES_RAW = os.environ.get("YOUTUBE_COOKIES", "")
 YT_CACHE: dict[str, dict] = {}
 CACHE_TTL = 600
 
+
 def parse_netscape_cookies(raw: str) -> str:
     """تحويل نص الكوكيز (Netscape أو Header) إلى صيغة Cookie header صالحة"""
     if not raw:
@@ -39,22 +40,29 @@ def parse_netscape_cookies(raw: str) -> str:
             pairs.append(f"{parts[5]}={parts[6]}")
     return "; ".join(pairs)
 
+
 COOKIE_HEADER = parse_netscape_cookies(YT_COOKIES_RAW)
+
 
 def sanitize_filename(title: str) -> str:
     clean = re.sub(r'[\\/*?:"<>|]', "", title)
     return clean[:50].strip() or "video"
 
+
 def extract_youtube_id(url: str):
-    parsed = urlparse(url)
-    if "youtu.be" in parsed.netloc:
-        return parsed.path.lstrip("/").split("?")[0]
-    if "youtube.com" in parsed.netloc:
-        if "/shorts/" in parsed.path:
-            return parsed.path.split("/shorts/")[1].split("/")[0].split("?")[0]
-        if "/watch" in parsed.path:
-            return parse_qs(parsed.query).get("v", [None])[0]
-    return None
+    """استخراج رقم الفيديو من جميع صيغ روابط يوتيوب (الآيفون، الشورتس، الروابط المختصرة، أو الروابط المرفقة بنص)"""
+    match = re.search(
+        r"(?:(?:www\.|m\.)?youtube\.com/(?:watch\?.*v=|shorts/|embed/|v/|live/)|youtu\.be/)([a-zA-Z0-9_-]{11})",
+        url
+    )
+    return match.group(1) if match else None
+
+
+def extract_clean_url(text: str) -> str:
+    """استخراج الرابط الصافي في حال قام تطبيق الجوال بنسخ نص مع الرابط"""
+    match = re.search(r"https?://[^\s]+", text.strip())
+    return match.group(0) if match else text.strip()
+
 
 async def verify_stream_url(client: httpx.AsyncClient, stream_url: str, ua: str) -> bool:
     try:
@@ -65,6 +73,7 @@ async def verify_stream_url(client: httpx.AsyncClient, stream_url: str, ua: str)
         return res.status_code in (200, 206)
     except Exception:
         return False
+
 
 async def fetch_youtube_via_worker(video_id: str, force_refresh: bool = False):
     now = time.time()
@@ -159,6 +168,7 @@ async def fetch_youtube_via_worker(video_id: str, force_refresh: bool = False):
                     if not mp4s:
                         continue
 
+                    # تفضيل الصيغ المدمجة بالصوت لضمان عمل الصوت على الآيفون
                     combined = [f for f in mp4s if f.get("audioQuality")]
                     pool = combined if combined else mp4s
                     best = sorted(pool, key=lambda x: x.get("height", 0), reverse=True)[0]
@@ -185,13 +195,16 @@ async def fetch_youtube_via_worker(video_id: str, force_refresh: bool = False):
 
     return {"error": last_status}
 
+
 @app.api_route("/", methods=["GET", "HEAD"])
 def serve_home():
     return FileResponse("index.html")
 
+
 @app.get("/manifest.json")
 def serve_manifest():
     return FileResponse("manifest.json")
+
 
 YDL_OPTS = {
     'format': 'best[ext=mp4]/best',
@@ -201,9 +214,11 @@ YDL_OPTS = {
     'geo_bypass': True,
 }
 
+
 @app.get("/api/info")
 async def get_video_info(url: str = Query(...)):
-    yt_id = extract_youtube_id(url)
+    clean_url = extract_clean_url(url)
+    yt_id = extract_youtube_id(clean_url)
     if yt_id:
         yt_data = await fetch_youtube_via_worker(yt_id)
         if yt_data and yt_data.get("direct_url"):
@@ -216,7 +231,7 @@ async def get_video_info(url: str = Query(...)):
 
     try:
         with yt_dlp.YoutubeDL(YDL_OPTS) as ydl:
-            info = ydl.extract_info(url, download=False)
+            info = ydl.extract_info(clean_url, download=False)
             return {
                 "title": sanitize_filename(info.get("title", "video")),
                 "thumbnail": info.get("thumbnail"),
@@ -225,12 +240,14 @@ async def get_video_info(url: str = Query(...)):
     except Exception:
         raise HTTPException(status_code=400, detail="تعذر قراءة الرابط. تأكد أن الفيديو عام وليس خاصاً.")
 
+
 @app.get("/api/stream")
 async def stream_video(url: str = Query(...), title: str = Query("video")):
+    clean_url = extract_clean_url(url)
     video_url = None
     http_headers = {}
 
-    yt_id = extract_youtube_id(url)
+    yt_id = extract_youtube_id(clean_url)
     if yt_id:
         yt_data = await fetch_youtube_via_worker(yt_id, force_refresh=False)
         if yt_data and yt_data.get("direct_url"):
@@ -244,7 +261,7 @@ async def stream_video(url: str = Query(...), title: str = Query("video")):
     if not video_url:
         try:
             with yt_dlp.YoutubeDL(YDL_OPTS) as ydl:
-                info = ydl.extract_info(url, download=False)
+                info = ydl.extract_info(clean_url, download=False)
                 video_url = info.get("url")
                 http_headers = info.get("http_headers", {})
         except Exception:
